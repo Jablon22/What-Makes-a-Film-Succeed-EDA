@@ -1,2 +1,7 @@
-# Movies-EDA
-Exploratory Data Analysis (EDA) was conducted to understand the dataset structure, analyze distributions, and identify missing values and outliers. Visualizations were used to explore relationships between variables, especially differences between profitable and unprofitable movies, guiding further statistical analysis.
+## Exploratory Data Analysis (EDA)
+
+- Examined dataset structure and key variables  
+- Analyzed distributions, missing values, and outliers  
+- Used visualizations to explore feature relationships  
+- Compared profitable vs. unprofitable movies  
+- Informed hypotheses and further statistical analysis
