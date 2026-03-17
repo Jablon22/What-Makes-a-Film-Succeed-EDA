@@ -1,0 +1,1219 @@
+---
+title: "Exploratory Data Analysis — Films"
+author: "Jakub Groblicki"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 5
+)
+set.seed(42)
+```
+
+```{css, echo=FALSE}
+body { font-size: 15px; line-height: 1.8; }
+h1 { border-bottom: 2px solid #2c3e50; padding-bottom: 6px; margin-top: 2rem; }
+h2 { color: #2c3e50; margin-top: 1.8rem; }
+h3 { color: #6d597a; margin-top: 1.4rem; }
+blockquote {
+  border-left: 4px solid #6d597a;
+  background: #f5f0f8;
+  padding: 12px 18px;
+  margin: 16px 0;
+  border-radius: 4px;
+  font-size: 14.5px;
+}
+.result-box {
+  background: #eaf4ea;
+  border-left: 4px solid #2a9d8f;
+  padding: 12px 18px;
+  border-radius: 4px;
+  margin: 16px 0;
+  font-size: 14.5px;
+}
+.note-box {
+  background: #fef9ec;
+  border-left: 4px solid #e9c46a;
+  padding: 12px 18px;
+  border-radius: 4px;
+  margin: 16px 0;
+  font-size: 14.5px;
+}
+p { margin-bottom: 0.9rem; }
+```
+
+```{r packages, include=FALSE}
+library(tidyverse)
+library(psych)
+library(gridExtra)
+library(mice)
+library(corrplot)
+library(nortest)
+library(scales)
+library(dunn.test)
+```
+
+```{r palette, include=FALSE}
+col_profit <- "#2a9d8f"
+col_loss   <- "#e76f51"
+col_nom    <- "#6d597a"
+col_none   <- "#a8dadc"
+col_gold   <- "#e9c46a"
+```
+
+```{r helper-awards, include=FALSE}
+assign_award_group <- function(df,
+                               col_awards = "Oscar and Golden Globes awards",
+                               col_noms   = "Oscar and Golden Globes nominations",
+                               labels     = c("No nominations",
+                                              "Nominated, no award",
+                                              "At least 1 award")) {
+  df %>%
+    mutate(
+      award_group = factor(
+        ifelse(.data[[col_awards]] > 0, labels[3],
+               ifelse(.data[[col_noms]] > 0, labels[2], labels[1])),
+        levels = labels
+      )
+    )
+}
+
+effect_label <- function(rho) {
+  ifelse(abs(rho) < 0.10, "negligible",
+  ifelse(abs(rho) < 0.30, "small",
+  ifelse(abs(rho) < 0.50, "medium", "large")))
+}
+```
+
+---
+
+# Introduction
+
+This report presents an Exploratory Data Analysis (EDA) of a dataset of
+feature films. The analysis examines financial outcomes (budget, box office
+revenue, and earnings), IMDb audience ratings, and selected descriptive
+attributes of productions including genre, release year, director, and cast.
+
+The analysis is structured around three research questions:
+
+1. **What factors are associated with a film posting a negative financial result?**
+2. **What influences a film's IMDb rating?**
+3. **Do industry-recognised films differ systematically from the rest?**
+
+All findings are exploratory — they describe patterns, distributions and
+associations observed in the data, and do not imply causal relationships.
+
+---
+
+# Dataset
+
+## Description
+
+The dataset contains information on feature films drawn from several decades
+of theatrical releases. Each row corresponds to one film and includes
+financial figures, IMDb scores, and descriptive attributes.
+
+| Variable | Type | Description |
+|---|---|---|
+| `Movie` | Text | Film title |
+| `Director` | Text | Director's name |
+| `Running time` | Numeric | Duration (minutes) |
+| `Actor 1` | Text | Lead actor |
+| `Actor 2` | Text | Supporting actor |
+| `Actor 3` | Text | Third-billed actor |
+| `Genre` | Categorical | Genre (e.g. Action, Comedy, Drama) |
+| `Budget` | Numeric | Production budget (USD) |
+| `Box Office` | Numeric | Total theatrical revenue (USD) |
+| `Actors Box Office %` | Numeric | % of the cast's prior films where box office ≥ 2× budget |
+| `Director Box Office %` | Numeric | % of the director's prior films where box office ≥ 2× budget |
+| `Earnings` | Numeric | Profit = Box Office − Budget (USD) |
+| `Oscar and Golden Globes nominations` | Numeric | Total Oscar and Golden Globe nominations received |
+| `Oscar and Golden Globes awards` | Numeric | Total Oscars and Golden Globes won |
+| `Release year` | Numeric | Year of theatrical release |
+| `IMDb score` | Numeric | Mean IMDb audience rating (scale 1–10) |
+
+## Loading the Data
+
+```{r load}
+movies <- readr::read_csv(
+  "movies_data.csv",
+  locale = readr::locale(encoding = "windows-1252")
+)
+```
+
+A preview of the first and last rows confirms the general structure and
+format of the data:
+
+```{r preview}
+head(movies, 5)
+tail(movies, 5)
+```
+
+```{r structure}
+str(movies)
+```
+
+The dataset contains `r nrow(movies)` rows and `r ncol(movies)` columns.
+Financial variables are stored as integers (USD values with no decimal
+places), which is consistent with expectations.
+
+---
+
+## Data Cleaning
+
+### Missing values
+
+```{r missing-check}
+anyNA(movies)
+colSums(is.na(movies))
+```
+
+```{r missing-plot, fig.height=4}
+md.pattern(movies)
+```
+
+Missing values are confined to two columns. `Actor 3` has
+`r sum(is.na(movies$"Actor 3"))` missing entries — a third-billed actor is
+simply absent for many productions, so these are replaced with `"Unknown"`.
+`Oscar and Golden Globes awards` has
+`r sum(is.na(movies$"Oscar and Golden Globes awards"))` missing entries.
+Before imputing, we verify that all affected films also have zero
+nominations — which would confirm the missing value means *no award won*
+rather than a data collection failure:
+
+```{r missing-impute}
+na_awards_idx <- is.na(movies$`Oscar and Golden Globes awards`)
+cat("Nomination counts for films with missing award values:\n")
+table(movies$`Oscar and Golden Globes nominations`[na_awards_idx])
+
+movies$`Oscar and Golden Globes awards`[na_awards_idx] <- 0
+movies$`Actor 3`[is.na(movies$`Actor 3`)] <- "Unknown"
+```
+
+All films with a missing award count also have zero nominations, confirming
+that the missing values represent absent awards rather than absent data.
+Both columns are imputed accordingly.
+
+### Duplicate rows
+
+```{r duplicates}
+cat("Duplicate rows found:", sum(duplicated(movies)), "\n")
+movies <- movies[!duplicated(movies), ]
+cat("Rows retained after deduplication:", nrow(movies), "\n")
+```
+
+---
+
+## Data Preparation
+
+### Type conversion
+
+`Genre` is converted to a factor to ensure correct grouping behaviour and
+ordered axis labels in plots:
+
+```{r genre-factor}
+movies$Genre <- as.factor(movies$Genre)
+cat("Genres present:", paste(levels(movies$Genre), collapse = ", "), "\n")
+```
+
+The dataset contains `r nlevels(movies$Genre)` distinct genres.
+
+### Verifying `Earnings`
+
+We confirm that `Earnings` equals Box Office − Budget for every row, and
+that it does not incorporate other revenue streams such as rights sales or
+merchandise:
+
+```{r earnings-check}
+all_zero <- all((movies$Earnings - (movies$`Box Office` - movies$Budget)) == 0)
+cat("Earnings equals Box Office minus Budget for all rows:", all_zero, "\n")
+```
+
+The check confirms a perfect identity. `Earnings` reflects theatrical
+revenues only — a point worth bearing in mind throughout the financial
+analysis, since real profitability would also depend on home release,
+streaming rights, and ancillary markets.
+
+### Adding the ROI variable
+
+Raw earnings are scale-dependent: a \$300M profit means something very
+different on a \$30M budget than on a \$250M budget. We add a **Return on
+Investment** ratio (`roi = Box Office / Budget`) to capture relative
+financial performance alongside absolute earnings:
+
+```{r roi}
+movies <- movies %>% mutate(roi = `Box Office` / Budget)
+summary(movies$roi)
+```
+
+A film with `roi > 1` recovered its production costs from theatrical
+revenues alone. An `roi > 2` is a common industry benchmark for a
+commercially successful release.
+
+### Correcting `Actors Box Office %`
+
+`Actors Box Office %` is a percentage (range 0–100) representing the
+proportion of an actor's prior films where box office reached at least 2×
+the production budget. Any value above 100 is logically impossible and
+indicates a data entry error:
+
+```{r actors-fix}
+cat("Records with Actors Box Office % > 100:",
+    sum(movies$`Actors Box Office %` > 100, na.rm = TRUE), "\n")
+
+movies$`Actors Box Office %`[movies$`Actors Box Office %` > 100] <- NA
+
+cat("Records with Actors Box Office % > 100 after correction:",
+    sum(movies$`Actors Box Office %` > 100, na.rm = TRUE), "\n")
+```
+
+Both erroneous records are replaced with `NA`.
+
+### Pre-computing director performance groups
+
+To avoid repeating the same `cut()` call across multiple sections, the
+director performance quartile grouping is computed once here and reused
+throughout:
+
+```{r director-groups}
+movies <- movies %>%
+  mutate(
+    director_group = cut(
+      `Director Box Office %`,
+      breaks = quantile(`Director Box Office %`,
+                        probs = c(0, .25, .5, .75, 1), na.rm = TRUE),
+      labels = c("Low (Q1)", "Mid-low (Q2)", "Mid-high (Q3)", "High (Q4)"),
+      include.lowest = TRUE
+    )
+  )
+```
+
+---
+
+## Descriptive Statistics
+
+```{r descriptive-stats}
+num_cols <- c("Running time", "Budget", "Box Office",
+              "Actors Box Office %", "Director Box Office %",
+              "Earnings", "roi",
+              "Oscar and Golden Globes nominations",
+              "Oscar and Golden Globes awards",
+              "Release year", "IMDb score")
+
+summary(movies[, num_cols])
+```
+
+The `psych` package extends the summary with shape measures — skewness and
+kurtosis:
+
+```{r describe}
+describe(movies[, num_cols]) %>%
+  select(n, mean, sd, median, min, max, skew, kurtosis) %>%
+  round(2)
+```
+
+<div class="note-box">
+**Kurtosis convention.** `psych::describe()` reports *excess kurtosis*
+(standard Pearson kurtosis minus 3). A normal distribution therefore has
+excess kurtosis = 0. Positive values denote heavier tails than normal
+(leptokurtic); negative values denote lighter tails (platykurtic).
+</div>
+
+The most striking feature of the descriptive table is the strong
+right-skewness of all financial variables. `Budget` and `Box Office` exhibit
+very long right tails — a pattern typical of entertainment industry data,
+where revenue is highly concentrated around a few major blockbusters.
+`Earnings` is similarly asymmetric, centred around small positive values
+with a pronounced right tail from major hits and a visible left tail from
+loss-making productions. This distributional shape has a direct
+methodological implication: **robust location measures (median, IQR) and
+non-parametric inferential tests are the appropriate tools for all financial
+variables** throughout this analysis.
+
+### Distributions of financial variables
+
+The three histograms below illustrate the key financial variables. Budget
+and Box Office use a logarithmic x-axis — without it, a handful of extreme
+outliers would compress the entire distribution into an unreadable spike.
+Earnings cannot be log-transformed because it takes negative values, so the
+raw scale is used instead, with bars coloured by profit/loss status:
+
+```{r financial-distributions, fig.height=4}
+p1 <- ggplot(movies, aes(x = Budget)) +
+  geom_histogram(fill = col_nom, colour = "white", bins = 40) +
+  scale_x_log10(labels = label_dollar(scale = 1e-6, suffix = " M")) +
+  labs(title = "Budget", x = "Budget [USD, log scale]",
+       y = "Number of films") +
+  theme_minimal(base_size = 11)
+
+p2 <- ggplot(movies, aes(x = `Box Office`)) +
+  geom_histogram(fill = col_profit, colour = "white", bins = 40) +
+  scale_x_log10(labels = label_dollar(scale = 1e-6, suffix = " M")) +
+  labs(title = "Box Office", x = "Box office [USD, log scale]",
+       y = "Number of films") +
+  theme_minimal(base_size = 11)
+
+p3 <- ggplot(movies, aes(x = Earnings)) +
+  geom_density(fill = col_nom, alpha = 0.6, colour = col_nom) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.7) +
+  scale_x_continuous(
+    labels = label_dollar(scale = 1e-6, suffix = " M"),
+    limits = c(
+      quantile(movies$Earnings, 0.01),
+      quantile(movies$Earnings, 0.99)
+    )
+  ) +
+  labs(
+    title = "Earnings",
+    x     = "Earnings [USD]",
+    y     = "Density"
+  ) +
+  theme_minimal(base_size = 11)
+
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3,
+  top = "Distributions of key financial variables")
+```
+
+Both Budget and Box Office follow approximately log-normal distributions:
+roughly symmetric on the log scale, but strongly right-skewed on the
+original scale. The Earnings histogram confirms that the majority of films
+post a positive result, though the left tail of loss-making productions is
+clearly visible.
+
+## Correlation Matrix
+
+Before turning to the individual research questions, it is useful to survey
+the pairwise associations between all major variables simultaneously. We use
+**Spearman rank correlation**, which is robust to outliers and makes no
+assumption of linearity. `Earnings` is deliberately excluded from the matrix
+— since it is defined as Box Office − Budget, its Spearman correlation with
+those two variables is structurally inflated and does not carry independent
+information.
+
+```{r correlation-matrix, fig.height=6, fig.width=7}
+cor_mat <- cor(
+  movies[, c("IMDb score", "Budget", "Box Office",
+             "Oscar and Golden Globes nominations",
+             "Oscar and Golden Globes awards",
+             "Release year",
+             "Actors Box Office %",
+             "Director Box Office %")],
+  method = "spearman",
+  use    = "pairwise.complete.obs"
+)
+
+corrplot(
+  cor_mat,
+  method      = "square",
+  type        = "upper",
+  tl.cex      = 0.85,
+  tl.col      = "black",
+  addCoef.col = "black",
+  number.cex  = 0.70,
+  col         = colorRampPalette(c(col_loss, "white", col_profit))(200),
+  mar         = c(0, 0, 1, 0),
+  title       = "Spearman rank correlations"
+)
+```
+
+Four associations stand out. The strongest relationship in the matrix is
+**Budget ↔ Box Office** (ρ ≈ 0.75): higher production budgets are strongly
+associated with higher theatrical revenues, reflecting the role of marketing
+spend and production scale in driving audience attendance. **IMDb score
+correlates moderately with nominations and awards** (ρ ≈ 0.40–0.45),
+indicating that critical industry recognition and audience appreciation tend
+to co-occur. **Nominations and awards** are very strongly correlated with
+each other, as expected — winning an award requires nomination first.
+Finally, **Release year shows a weak negative correlation with IMDb score**
+(ρ < 0), meaning older films tend to receive marginally higher ratings, a
+pattern explored in detail in a later section.
+
+<div class="note-box">
+**A note on statistical significance at large sample sizes.** With n ≈
+3,900 observations, even correlations as small as |ρ| ≈ 0.03 will produce
+statistically significant p-values. Throughout this analysis, **the
+magnitude of ρ matters far more than its p-value.** We interpret effect
+sizes using Cohen's benchmarks: |ρ| < 0.10 = negligible, 0.10–0.30 =
+small, 0.30–0.50 = medium, > 0.50 = large.
+</div>
+
+---
+
+# Why Do Some Films Post a Negative Profit?
+
+We begin by establishing the scale of the phenomenon:
+
+```{r loss-count}
+n_loss   <- sum(movies$Earnings < 0)
+pct_loss <- round(mean(movies$Earnings < 0) * 100, 1)
+cat("Films posting a loss:", n_loss,
+    sprintf("(%.1f%% of the dataset)\n", pct_loss))
+```
+
+Approximately **`r pct_loss`%** of films in the dataset recorded a negative
+theatrical result. This figure should be interpreted with care: as noted
+above, `Earnings` captures box office revenues only. Films that appear
+loss-making here may have recovered their budgets through home video,
+streaming rights, television licensing, or merchandising.
+
+### Top 10 films by profit and loss
+
+Before any aggregated analysis, it is instructive to inspect the films at
+both extremes of the earnings distribution:
+
+```{r top10-chart, fig.height=5}
+top_profit <- movies %>%
+  slice_max(Earnings, n = 10) %>%
+  mutate(label = paste0(Movie, " (", `Release year`, ")"), result = "Profit")
+
+top_loss <- movies %>%
+  slice_min(Earnings, n = 10) %>%
+  mutate(label = paste0(Movie, " (", `Release year`, ")"), result = "Loss")
+
+bind_rows(top_profit, top_loss) %>%
+  ggplot(aes(x = reorder(label, Earnings), y = Earnings / 1e6, fill = result)) +
+  geom_col() +
+  geom_hline(yintercept = 0, colour = "grey30", linewidth = 0.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("Profit" = col_profit, "Loss" = col_loss)) +
+  scale_y_continuous(labels = label_dollar(suffix = " M")) +
+  labs(
+    title    = "Top 10 films — largest profit and largest loss",
+    subtitle = "Earnings = Box Office − Budget (theatrical revenues only)",
+    x = NULL, y = "Earnings [USD M]", fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+The asymmetry is striking: the largest profits comfortably exceed \$700M,
+while the largest losses are roughly an order of magnitude smaller. This
+reflects the general structure of the industry — catastrophic flops are
+bounded by the size of their budgets, whereas a blockbuster can generate
+revenues many times its production cost.
+
+## Does Genre Influence Financial Loss?
+
+Comparing raw film counts by genre is a necessary first step, but
+inherently misleading — Action, Comedy and Drama simply produce more films
+in absolute terms, which mechanically generates more absolute losses:
+
+```{r genre-count, fig.height=5.5}
+movies %>%
+  mutate(result = ifelse(Earnings >= 0, "Profit", "Loss")) %>%
+  count(Genre, result) %>%
+  ggplot(aes(x = reorder(Genre, n), y = n, fill = result)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  scale_fill_manual(values = c("Profit" = col_profit, "Loss" = col_loss)) +
+  labs(title = "Number of films by genre — profit vs loss",
+       x = "Genre", y = "Number of films", fill = "Financial result") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+The meaningful comparison is the **proportion** of loss-making films within
+each genre, which controls for genre size:
+
+```{r genre-proportion, fig.height=5.5}
+genre_summary <- movies %>%
+  group_by(Genre) %>%
+  summarise(pct_loss = mean(Earnings < 0) * 100, n_films = n(), .groups = "drop")
+
+ggplot(genre_summary,
+       aes(x = reorder(Genre, pct_loss), y = pct_loss, fill = pct_loss)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(round(pct_loss, 1), "%  (n=", n_films, ")")),
+            hjust = -0.05, size = 3.2) +
+  coord_flip(clip = "off") +
+  scale_fill_gradient(low = col_profit, high = col_loss) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
+  labs(
+    title    = "Loss rate by genre",
+    subtitle = "Percentage of films with negative earnings | n = total films in genre",
+    x = "Genre", y = "Loss rate [%]"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+Drama and Biography show the highest loss rates among well-represented
+genres, likely reflecting a combination of lower commercial appeal and niche
+audience bases alongside sometimes substantial production costs. The Romance
+genre registers a 0% loss rate, but with only 4 films this is a sampling
+artefact rather than a meaningful finding.
+
+### Kruskal-Wallis test and Dunn post-hoc comparisons
+
+To formally test whether earnings distributions differ significantly across
+genres, we apply the **Kruskal-Wallis test** — the non-parametric analogue
+of one-way ANOVA, which ranks all observations and tests whether the rank
+distributions are the same across groups. If the global test is significant,
+**Dunn's post-hoc test** with Benjamini-Hochberg (BH) false discovery rate
+correction identifies which specific genre pairs drive the result.
+
+> **H₀:** The earnings distribution is identical across all genres.
+>
+> **H₁:** At least one genre has a different earnings distribution.
+
+```{r genre-kruskal}
+kw <- kruskal.test(Earnings ~ Genre, data = movies)
+kw
+```
+
+<div class="result-box">
+**Kruskal-Wallis result.** χ²(`r kw$parameter`) = `r round(kw$statistic, 2)`,
+p `r ifelse(kw$p.value < 0.001, "< 0.001", paste("=", round(kw$p.value, 3)))`.
+We **reject H₀**: earnings distributions differ significantly across genres.
+At least one genre has a statistically distinct earnings profile from the
+rest. The Dunn post-hoc analysis below identifies which specific pairs are
+responsible.
+</div>
+
+```{r genre-dunn}
+dunn_result <- dunn.test(
+  movies$Earnings,
+  movies$Genre,
+  method = "bh",
+  altp   = TRUE,
+  list   = FALSE
+)
+```
+
+<div class="result-box">
+**Dunn post-hoc result.** With BH correction applied, the pairs showing the
+most pronounced statistically significant differences involve Drama and
+Biography on one side and high-revenue genres such as Action and Animation
+on the other. Genre is a statistically significant driver of earnings,
+though effect sizes are moderate — genre alone cannot reliably predict
+whether any individual film will be profitable.
+</div>
+
+## Does Release Year Influence Financial Loss?
+
+```{r year-count, fig.height=4.5}
+movies %>%
+  mutate(result = ifelse(Earnings >= 0, "Profit", "Loss")) %>%
+  count(`Release year`, result) %>%
+  ggplot(aes(x = `Release year`, y = n, fill = result)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = c("Profit" = col_profit, "Loss" = col_loss)) +
+  labs(title = "Number of films by release year — profit vs loss",
+       x = "Release year", y = "Number of films", fill = "Financial result") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+Both profitable and loss-making films have grown in absolute number since
+the late 1990s, primarily reflecting a rapid expansion of film production
+volume rather than a deterioration of industry economics. As with genres,
+raw counts conceal the more informative picture — proportions:
+
+```{r year-proportion, fig.height=4.5}
+movies %>%
+  group_by(`Release year`) %>%
+  summarise(pct_loss = mean(Earnings < 0) * 100, n = n(), .groups = "drop") %>%
+  filter(n >= 5) %>%
+  ggplot(aes(x = `Release year`, y = pct_loss)) +
+  geom_col(fill = col_loss, alpha = 0.75) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE,
+              colour = "black", fill = "grey70", alpha = 0.25, linewidth = 0.8) +
+  labs(
+    title    = "Loss rate by release year",
+    subtitle = "Years with ≥ 5 films only | LOESS span = 0.75 | grey band = 95% CI",
+    x = "Release year", y = "Loss rate [%]"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+The LOESS smoother does not reveal a sustained directional trend. The loss
+rate fluctuates irregularly year to year and shows no systematic increase
+over time, suggesting that the overall proportion of loss-making productions
+has remained roughly stable across the decades covered by this dataset.
+
+## Does an Excessive Budget Cause a Loss?
+
+We first compare the budget distributions of profitable and loss-making films
+using summary statistics:
+
+```{r budget-summary}
+cat("--- Profitable films ---\n")
+summary(movies$Budget[movies$Earnings >= 0])
+cat("\n--- Loss-making films ---\n")
+summary(movies$Budget[movies$Earnings < 0])
+cat(sprintf(
+  "\nMedian budget — Profitable: $%.1fM | Loss-making: $%.1fM\n",
+  median(movies$Budget[movies$Earnings >= 0]) / 1e6,
+  median(movies$Budget[movies$Earnings <  0]) / 1e6
+))
+```
+
+```{r budget-boxplot}
+movies %>%
+  mutate(result = ifelse(Earnings >= 0, "Profit", "Loss")) %>%
+  ggplot(aes(x = result, y = Budget, fill = result)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("Profit" = col_profit, "Loss" = col_loss)) +
+  scale_y_log10(labels = label_dollar(scale = 1e-6, suffix = " M")) +
+  labs(
+    title    = "Budget distribution by financial result",
+    subtitle = "Y-axis on log scale | horizontal bar = median",
+    x = "Financial result", y = "Budget [USD]"
+  ) +
+  guides(fill = "none") +
+  theme_minimal(base_size = 12)
+```
+
+The medians are close and the IQR ranges overlap substantially, suggesting
+that budget size alone is not a reliable predictor of financial success.
+However, the upper tail of the profitable group extends further — very large
+budgets appear somewhat more often among profitable films, indicating that
+the largest productions have a better chance of generating revenues that
+justify their costs.
+
+### Normality check and Wilcoxon rank-sum test
+
+Before choosing a test, we verify the normality of the budget distribution
+in each group using the **Anderson-Darling test**. R's built-in
+`shapiro.test()` cannot be applied here because it imposes a hard upper
+limit of n ≤ 5,000. Furthermore, at n ≈ 3,900 any normality test has
+near-perfect statistical power — even trivially small departures from
+normality will produce significant results. The normality test here serves
+solely to formally confirm that non-parametric methods are appropriate.
+
+```{r budget-normality}
+cat("=== Loss-making films (Anderson-Darling) ===\n")
+ad.test(movies$Budget[movies$Earnings < 0])
+
+cat("\n=== Profitable films (Anderson-Darling) ===\n")
+ad.test(movies$Budget[movies$Earnings >= 0])
+```
+
+<div class="result-box">
+**Anderson-Darling result.** Both groups yield p < 0.001, confirming
+non-normality in both subgroups. We proceed with the non-parametric
+**Wilcoxon rank-sum test**.
+</div>
+
+> **H₀:** The budget distributions of profitable and loss-making films do not differ.
+>
+> **H₁:** Profitable films have higher budgets than loss-making films (one-sided test).
+
+```{r budget-wilcoxon}
+wt <- wilcox.test(
+  movies$Budget[movies$Earnings >= 0],
+  movies$Budget[movies$Earnings <  0],
+  alternative = "greater"
+)
+wt
+```
+
+```{r budget-effect-size}
+n1   <- sum(movies$Earnings >= 0)
+n2   <- sum(movies$Earnings <  0)
+r_rb <- 1 - (2 * wt$statistic) / (n1 * n2)
+cat(sprintf("Rank-biserial correlation r = %.3f\n", r_rb))
+cat("Benchmarks: |r| < 0.10 negligible | 0.10-0.30 small | 0.30-0.50 medium | > 0.50 large\n")
+```
+
+<div class="result-box">
+**Wilcoxon rank-sum result.** W = `r formatC(wt$statistic, format = "f", digits = 0)`,
+p `r ifelse(wt$p.value < 0.001, "< 0.001", paste("=", round(wt$p.value, 4)))`.
+We **reject H₀**: profitable films have statistically significantly higher
+budgets than loss-making films. The rank-biserial effect size r =
+`r round(r_rb, 3)` is `r effect_label(r_rb)`, meaning the difference is
+real but modest in practical terms — consistent with the substantial
+distributional overlap seen in the boxplot above.
+
+**Methodological note.** The Wilcoxon rank-sum test formally assesses
+stochastic dominance (the probability that a randomly selected profitable
+film has a higher budget than a randomly selected loss-making one).
+Interpreting this as a difference in medians additionally requires the
+assumption that both distributions share the same shape, differing only in
+location. Given the similar IQR widths visible above, this assumption is
+plausible but is not formally tested.
+</div>
+
+## Does IMDb Rating Influence Earnings?
+
+```{r imdb-earnings-density}
+movies %>%
+  mutate(result = ifelse(Earnings >= 0, "Profit", "Loss")) %>%
+  ggplot(aes(x = `IMDb score`, fill = result)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("Profit" = col_profit, "Loss" = col_loss)) +
+  labs(
+    title    = "IMDb score distribution by financial result",
+    subtitle = "Overlapping distributions indicate IMDb score is not a reliable predictor of earnings",
+    x = "IMDb score", y = "Density", fill = "Financial result"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+The density curves for profitable and loss-making films are nearly
+indistinguishable. The profitable group is shifted marginally to the right,
+but the overlap is so extensive that IMDb score cannot serve as a meaningful
+predictor of financial outcome. Films with low ratings can still turn a
+profit at the right budget level or with effective distribution, while
+critically praised films can fail commercially if they lack mainstream
+appeal. It is also worth noting that IMDb ratings are given by viewers
+*after* watching the film — they are a co-occurring reflection of perceived
+quality, not a causal input to financial success.
+
+## Does a Director's Track Record Reduce Loss Risk?
+
+Using the director performance quartile groups computed during data
+preparation, we compare earnings distributions across the four groups:
+
+```{r director-boxplot}
+movies %>%
+  filter(!is.na(director_group)) %>%
+  ggplot(aes(x = director_group, y = Earnings / 1e6, fill = director_group)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.15) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30") +
+  scale_fill_manual(values = c(col_none, col_nom, col_gold, col_profit)) +
+  scale_y_continuous(labels = label_dollar(suffix = " M")) +
+  labs(
+    title    = "Earnings by director's historical box office success rate",
+    subtitle = "Quartiles of Director Box Office % | dashed line = break-even",
+    x = "Director track record", y = "Earnings [USD M]"
+  ) +
+  guides(fill = "none") +
+  theme_minimal(base_size = 12)
+```
+
+```{r director-table}
+movies %>%
+  filter(!is.na(director_group)) %>%
+  group_by(director_group) %>%
+  summarise(
+    n        = n(),
+    Q1       = round(quantile(Earnings, .25) / 1e6, 1),
+    Median   = round(median(Earnings) / 1e6, 1),
+    Mean     = round(mean(Earnings) / 1e6, 1),
+    Q3       = round(quantile(Earnings, .75) / 1e6, 1),
+    `Loss %` = round(mean(Earnings < 0) * 100, 1)
+  )
+```
+
+A weak gradient is visible: directors in the highest-track-record quartile
+(Q4) have both a higher median earnings and a lower loss rate than those in
+the lowest quartile (Q1). However, the IQR remains very wide within every
+group — a strong historical record reduces, but clearly does not eliminate,
+the risk of a loss-making production.
+
+### Top 10 directors by median earnings
+
+The chart below shows the ten most consistently profitable directors in the
+dataset, restricted to those with at least five films to ensure the median
+is based on a sufficiently stable sample:
+
+```{r top-directors, fig.height=5}
+movies %>%
+  group_by(Director) %>%
+  summarise(n_films = n(), median_earnings = median(Earnings) / 1e6,
+            .groups = "drop") %>%
+  filter(n_films >= 5) %>%
+  slice_max(median_earnings, n = 10) %>%
+  ggplot(aes(x = reorder(Director, median_earnings), y = median_earnings,
+             fill = median_earnings)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0("$", round(median_earnings), "M  (n=", n_films, ")")),
+            hjust = -0.05, size = 3.2) +
+  coord_flip(clip = "off") +
+  scale_fill_gradient(low = col_profit, high = col_nom) +
+  scale_y_continuous(labels = label_dollar(suffix = " M"),
+                     expand = expansion(mult = c(0, 0.28))) +
+  labs(
+    title    = "Top 10 directors by median earnings",
+    subtitle = "Directors with ≥ 5 films in the dataset",
+    x = NULL, y = "Median earnings [USD M]"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+The five-film threshold is an accepted rule of thumb for median stability,
+but is admittedly arbitrary. Rankings for directors close to the cut-off
+should be treated with appropriate caution.
+
+---
+
+# What Influences IMDb Ratings?
+
+## IMDb Score Distribution
+
+Before examining potential predictors, we inspect the distribution of the
+outcome variable itself:
+
+```{r imdb-distribution, fig.height=4}
+ggplot(movies, aes(x = `IMDb score`)) +
+  geom_histogram(binwidth = 0.2, fill = col_nom, colour = "white", alpha = 0.9) +
+  geom_vline(xintercept = median(movies$`IMDb score`),
+             linetype = "dashed", colour = col_loss, linewidth = 0.8) +
+  annotate("text",
+           x     = median(movies$`IMDb score`) + 0.15,
+           y     = Inf,
+           label = paste0("median = ", round(median(movies$`IMDb score`), 2)),
+           vjust = 1.5, hjust = 0, size = 3.5, colour = col_loss) +
+  labs(title = "Distribution of IMDb scores", subtitle = "Dashed line = median",
+       x = "IMDb score", y = "Number of films") +
+  theme_minimal(base_size = 12)
+```
+
+```{r imdb-summary}
+summary(movies$`IMDb score`)
+```
+
+The distribution is approximately symmetric, with a median of
+`r round(median(movies$"IMDb score"), 2)` and a mode in the 6–7 range.
+The absence of pronounced skewness means that the IMDb score itself does not
+present distributional concerns, though we continue to use Spearman
+correlation throughout for consistency with the skewed financial variables.
+
+## Does a Higher Budget Lead to Better Ratings?
+
+```{r budget-imdb}
+ggplot(movies, aes(x = Budget, y = `IMDb score`)) +
+  geom_point(alpha = 0.2, colour = col_nom) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE,
+              colour = col_loss, fill = col_loss, alpha = 0.15, linewidth = 1) +
+  scale_x_log10(labels = label_dollar(scale = 1e-6, suffix = " M")) +
+  labs(title = "IMDb score vs Budget",
+       subtitle = "X-axis on log scale | LOESS span = 0.75 | band = 95% CI",
+       x = "Budget [USD]", y = "IMDb score") +
+  theme_minimal(base_size = 12)
+```
+
+The LOESS smoother is nearly flat across virtually the entire budget range,
+indicating that production spend has little bearing on how audiences rate a
+film. A slight upward curve is visible at very high budgets (above \$100M),
+but the scatter around the curve is enormous. Both micro-budget productions
+and \$200M blockbusters span the full range of IMDb scores.
+
+### Spearman correlation test
+
+> **H₀:** No monotonic association between Budget and IMDb score.
+>
+> **H₁:** A monotonic association exists.
+
+```{r budget-imdb-test}
+budget_cor <- cor.test(movies$Budget, movies$`IMDb score`, method = "spearman")
+budget_cor
+cat(sprintf("\nEffect size: |rho| = %.3f -> %s\n",
+            abs(budget_cor$estimate), effect_label(budget_cor$estimate)))
+```
+
+<div class="result-box">
+**Spearman correlation result (Budget ~ IMDb score).** ρ =
+`r round(budget_cor$estimate, 3)`,
+p `r ifelse(budget_cor$p.value < 0.001, "< 0.001", paste("=", round(budget_cor$p.value, 4)))`.
+The association is statistically significant but `r effect_label(budget_cor$estimate)`
+in practical terms. Budget explains only a negligible share of the variation
+in IMDb scores — consistent with the near-flat LOESS curve observed above.
+</div>
+
+## Does Box Office Success Influence Ratings?
+
+```{r boxoffice-imdb}
+ggplot(movies, aes(x = `Box Office`, y = `IMDb score`)) +
+  geom_point(alpha = 0.2, colour = col_nom) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE,
+              colour = col_loss, fill = col_loss, alpha = 0.15, linewidth = 1) +
+  scale_x_log10(labels = label_dollar(scale = 1e-6, suffix = " M")) +
+  labs(title = "IMDb score vs Box Office",
+       subtitle = "X-axis on log scale | LOESS span = 0.75 | band = 95% CI",
+       x = "Box office [USD]", y = "IMDb score") +
+  theme_minimal(base_size = 12)
+```
+
+The pattern here is somewhat more pronounced than for budget. The LOESS
+curve traces a modest positive trend — films that attracted larger audiences
+tend to receive marginally higher IMDb scores. This could reflect a selection
+effect (widely seen films accumulate more ratings, including from fans who
+sought them out precisely because they expected to enjoy them) or simply
+the fact that commercial and critical success are not independent.
+
+### Spearman correlation test
+
+> **H₀:** No monotonic association between Box Office and IMDb score.
+>
+> **H₁:** A monotonic association exists.
+
+```{r boxoffice-imdb-test}
+bo_cor <- cor.test(movies$`Box Office`, movies$`IMDb score`, method = "spearman")
+bo_cor
+cat(sprintf("\nEffect size: |rho| = %.3f -> %s\n",
+            abs(bo_cor$estimate), effect_label(bo_cor$estimate)))
+```
+
+<div class="result-box">
+**Spearman correlation result (Box Office ~ IMDb score).** ρ =
+`r round(bo_cor$estimate, 3)`,
+p `r ifelse(bo_cor$p.value < 0.001, "< 0.001", paste("=", round(bo_cor$p.value, 4)))`.
+The association is statistically significant and slightly stronger than for
+budget, but still `r effect_label(bo_cor$estimate)` by Cohen's benchmarks.
+Box office revenue and IMDb score co-vary, but the relationship explains
+only a small fraction of the variance in ratings.
+</div>
+
+## How Do Nominations Influence Ratings?
+
+```{r nominations-distribution}
+cat("Distribution of nomination counts:\n")
+table(movies$`Oscar and Golden Globes nominations`)
+```
+
+Over 70% of films in the dataset received no nominations whatsoever. Films
+with six or more nominations form a small but highly distinctive group,
+likely representing the most acclaimed productions in the dataset. To
+visualise how ratings relate to nomination count, we group films into four
+bands:
+
+```{r nominations-violin, fig.height=5}
+movies %>%
+  mutate(
+    nom_group = cut(`Oscar and Golden Globes nominations`,
+                    breaks = c(-1, 0, 2, 5, Inf),
+                    labels = c("0", "1-2", "3-5", "6+"))
+  ) %>%
+  ggplot(aes(x = nom_group, y = `IMDb score`, fill = nom_group)) +
+  geom_violin(alpha = 0.7, trim = FALSE) +
+  geom_boxplot(width = 0.12, fill = "white", outlier.shape = NA) +
+  geom_jitter(width = 0.05, alpha = 0.15, size = 0.6, colour = "grey40") +
+  scale_fill_manual(values = c(col_none, col_nom, col_gold, col_profit)) +
+  labs(
+    title    = "IMDb score by number of nominations",
+    subtitle = "Violin = full distribution | inner box = median & IQR | dots = individual films",
+    x = "Number of nominations", y = "IMDb score"
+  ) +
+  guides(fill = "none") +
+  theme_minimal(base_size = 12)
+```
+
+The violin shapes tell a clear story: as nomination count increases, the
+entire distribution shifts upward and narrows considerably. Films with no
+nominations show a broad distribution centred around 6–6.5 with a long left
+tail. The 6+ group, by contrast, is tightly concentrated between 7 and 8.5
+with very few films below 7. Greater industry recognition is strongly
+associated with both higher and more consistent audience ratings.
+
+## Does Winning an Award Have a Stronger Effect Than a Nomination Alone?
+
+```{r awards-distribution}
+cat("Distribution of award counts:\n")
+table(movies$`Oscar and Golden Globes awards`)
+```
+
+Films with five or more awards constitute a fraction of a percent of the
+dataset — exceptional productions by any measure.
+
+```{r awards-violin, fig.height=5}
+movies %>%
+  assign_award_group() %>%
+  ggplot(aes(x = award_group, y = `IMDb score`, fill = award_group)) +
+  geom_violin(alpha = 0.7, trim = FALSE) +
+  geom_boxplot(width = 0.12, fill = "white", outlier.shape = NA) +
+  geom_jitter(width = 0.05, alpha = 0.15, size = 0.6, colour = "grey40") +
+  scale_fill_manual(values = c(
+    "No nominations"      = col_loss,
+    "Nominated, no award" = col_none,
+    "At least 1 award"    = col_gold
+  )) +
+  labs(
+    title    = "IMDb score by award and nomination status",
+    subtitle = "Violin + boxplot + jitter | orange = no nominations, teal = nominated, gold = awarded",
+    x = NULL, y = "IMDb score"
+  ) +
+  guides(fill = "none") +
+  theme_minimal(base_size = 12)
+```
+
+The three distributions are cleanly ordered and clearly separated. Films
+with no nominations have the widest spread, with a pronounced left tail
+representing the many productions that received poor audience scores.
+Nominated-but-not-awarded films occupy a well-defined intermediate position,
+with the distribution shifted upward and the lower tail substantially
+shortened. Award-winning films form the tightest cluster, centred around
+7.5–8 with very few films below 7. **Winning an award is associated with a
+stronger and more consistent uplift in IMDb scores than receiving a
+nomination alone.**
+
+---
+
+# Are Industry-Recognised Films Longer?
+
+```{r runtime-awards}
+movies %>%
+  assign_award_group(labels = c("No nominations", "Nominated, no award", "Awarded")) %>%
+  ggplot(aes(x = award_group, y = `Running time`, fill = award_group)) +
+  geom_violin(alpha = 0.7, trim = FALSE) +
+  geom_boxplot(width = 0.12, fill = "white", outlier.shape = NA) +
+  geom_jitter(width = 0.05, alpha = 0.12, size = 0.6, colour = "grey40") +
+  scale_fill_manual(values = c(
+    "No nominations"      = col_loss,
+    "Nominated, no award" = col_none,
+    "Awarded"             = col_gold
+  )) +
+  labs(title = "Running time by industry recognition",
+       subtitle = "Violin + boxplot + jitter | colours correspond to award status",
+       x = NULL, y = "Running time [min]") +
+  guides(fill = "none") +
+  theme_minimal(base_size = 12)
+```
+
+A clear monotonic pattern emerges across award status groups. Films with no
+nominations cluster tightly in the 85–120 minute range — the standard
+commercial runtime. Nominated films spread more broadly, with a higher
+median and a longer right tail. Awarded films are the longest on average,
+with substantial right-skewness that reflects the inclusion of epic
+productions exceeding 150 minutes. This pattern is consistent with the idea
+that narratively ambitious, longer-form films receive more critical
+attention — though it is equally plausible that prestigious films simply
+have more resources and creative latitude to exceed standard runtime
+conventions.
+
+---
+
+# Are Newer Films Rated Lower?
+
+```{r year-imdb-scatter}
+ggplot(movies, aes(x = `Release year`, y = `IMDb score`)) +
+  geom_point(alpha = 0.15, colour = col_nom) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE,
+              colour = col_loss, fill = col_loss, alpha = 0.15, linewidth = 1) +
+  labs(title = "IMDb score by release year",
+       subtitle = "LOESS span = 0.75 | band = 95% CI",
+       x = "Release year", y = "IMDb score") +
+  theme_minimal(base_size = 12)
+```
+
+The LOESS curve traces a gradual downward trend from the 1960s through to
+2016. To make this pattern more legible and to expose the sample sizes
+underlying it, we aggregate to decade level:
+
+```{r year-median-decade, fig.height=4.5}
+movies %>%
+  mutate(decade = (`Release year` %/% 10) * 10) %>%
+  group_by(decade) %>%
+  summarise(median_imdb = median(`IMDb score`), n = n(), .groups = "drop") %>%
+  filter(n >= 20) %>%
+  ggplot(aes(x = factor(decade), y = median_imdb, fill = median_imdb)) +
+  geom_col(show.legend = FALSE, width = 0.7) +
+  geom_text(aes(label = paste0(round(median_imdb, 2), "\n(n=", n, ")")),
+            vjust = -0.3, size = 3.2, lineheight = 1.1) +
+  scale_fill_gradient(low = col_loss, high = col_profit) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Median IMDb score by decade",
+       subtitle = "Decades with >= 20 films | n shown per bar",
+       x = "Decade", y = "Median IMDb score") +
+  theme_minimal(base_size = 12)
+```
+
+The decline from the 1960s–70s to the 2000s–10s is visible but requires
+careful interpretation. The n values shown in the bars are essential context:
+pre-1970 decades contain very few films, meaning those estimates rest on
+small and highly selective samples. Films old enough and notable enough to
+appear in this dataset and to have attracted meaningful numbers of IMDb
+ratings are, by definition, a curated elite of classic cinema. More recent
+decades are represented by thousands of productions of varying quality.
+**The observed rating decline most plausibly reflects survivorship bias and
+a change in the composition of the rating audience, rather than a genuine
+decline in film quality over time.**
+
+### Spearman correlation test
+
+We apply Spearman correlation because release year is ordinal in nature, the
+IMDb score is bounded to 1–10, the relationship may be non-linear, and the
+method is robust to outliers.
+
+> **H₀:** No monotonic association between release year and IMDb score.
+>
+> **H₁:** A monotonic association exists.
+
+```{r year-imdb-test}
+year_cor <- cor.test(movies$`Release year`, movies$`IMDb score`,
+                     method = "spearman")
+year_cor
+cat(sprintf("\nEffect size: |rho| = %.3f -> %s\n",
+            abs(year_cor$estimate), effect_label(year_cor$estimate)))
+```
+
+<div class="result-box">
+**Spearman correlation result (Release year ~ IMDb score).** ρ =
+`r round(year_cor$estimate, 3)`,
+p `r ifelse(year_cor$p.value < 0.001, "< 0.001", paste("=", round(year_cor$p.value, 4)))`.
+We **reject H₀**: there is a statistically significant negative association
+between release year and IMDb score. The effect size is
+`r effect_label(year_cor$estimate)` by Cohen's benchmarks — release year
+accounts for a minimal fraction of the variance in ratings. The statistical
+signal is real, but its cause is almost certainly a compositional artefact
+(survivorship bias and audience demographics) rather than a genuine temporal
+trend in film quality.
+</div>
+
+---
+
+# Summary
+
+This exploratory data analysis covered `r nrow(movies)` feature films and
+investigated three main areas: the determinants of financial outcome, the
+factors associated with IMDb ratings, and the characteristics of
+industry-recognised productions.
+
+**Financial outcome** is difficult to predict from any single observable
+feature. A Kruskal-Wallis test confirmed that earnings distributions differ
+significantly across genres (χ²(`r kw$parameter`) = `r round(kw$statistic, 2)`,
+p < 0.001), with Dunn post-hoc comparisons identifying Drama and Biography
+as genres with systematically lower earnings relative to high-revenue genres
+such as Action and Animation. Budget is statistically significantly higher
+among profitable films (Wilcoxon rank-sum test, p < 0.001), but the
+rank-biserial effect size is modest (r = `r round(r_rb, 3)`) and the
+distributional overlap is large — budget alone is not a reliable predictor
+of profit. The ROI variable (`Box Office / Budget`) complements raw earnings
+by capturing relative financial performance independently of budget scale.
+Release year showed no sustained directional effect on the loss rate.
+
+**IMDb scores** are weakly but significantly associated with both budget
+(ρ = `r round(budget_cor$estimate, 3)`, negligible effect) and box office
+revenue (ρ = `r round(bo_cor$estimate, 3)`, small effect). Far stronger
+associations emerge with industry recognition: films receiving multiple
+nominations and, especially, award wins achieve markedly higher and more
+tightly clustered ratings. The rating advantage of award-winning films over
+non-nominated films is clearly visible even without formal testing. Newer
+films carry marginally lower ratings on average
+(ρ = `r round(year_cor$estimate, 3)`, small effect), but this is most
+plausibly explained by survivorship bias and audience demographic shifts
+rather than any decline in production quality.
+
+**Industry-recognised films** are systematically longer, better-rated, and
+more financially variable than films without nominations. The co-occurrence
+of high audience ratings and industry recognition is consistent across
+multiple analyses, though — as is appropriate for exploratory work — the
+direction of any causal relationship between these outcomes cannot be
+determined from the data alone.
+
+Taken together, the findings reinforce a recurring theme in the economics of
+cultural industries: film success is the product of many interacting factors,
+and no single variable — budget, genre, director track record, or release
+year — is a reliable standalone predictor of either financial performance or
+audience reception.
