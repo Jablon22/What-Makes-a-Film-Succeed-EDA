@@ -390,13 +390,18 @@ p3 <- ggplot(movies, aes(x = Earnings)) +
   ) +
   theme_minimal(base_size = 11)
 
-gridExtra::grid.arrange(p1, p2, p3, ncol = 3,
-  top = "Distributions of key financial variables")
+gridExtra::grid.arrange(
+  p1, p2,
+  p3,
+  layout_matrix = rbind(c(1, 2),
+                        c(3, 3)),
+  top = "Distributions of key financial variables"
+)
 ```
 
 Both Budget and Box Office follow approximately log-normal distributions:
 roughly symmetric on the log scale, but strongly right-skewed on the
-original scale. The Earnings histogram confirms that the majority of films
+original scale. The Earnings density plot confirms that the majority of films
 post a positive result, though the left tail of loss-making productions is
 clearly visible.
 
